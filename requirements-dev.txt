@@ -3,3 +3,8 @@
 -r requirements.txt
 
 pytest>=8.0,<9.0
+
+# Hyperparameter search tracking (src/tune.py) only. Deliberately NOT a runtime
+# dependency: train.py and the API never import it, so the served image stays
+# lean and CI does not install it.
+mlflow>=2.10,<4.0

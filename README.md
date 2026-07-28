@@ -12,9 +12,13 @@ testing and CI.
 pip install -r requirements-dev.txt   # runtime + test dependencies
 
 python src/fetch_movielens.py         # real MovieLens 100K (needs network)
+python src/tune.py                    # optional: hyperparameter search (~10 min)
 python src/train.py
 pytest
 ```
+
+`train.py` uses `models/best_params.json` when `tune.py` has produced it, and
+falls back to documented defaults otherwise — it prints which.
 
 ## Data
 
@@ -169,70 +173,102 @@ prints an explicit `WARNING` if the model ever fails to beat either.
 
 ## Results — real MovieLens 100K
 
-100,000 ratings, 943 users, 1,682 movies. Hyperparameters are the untuned
-defaults (`n_factors=20, lr=0.01, reg=0.02, n_epochs=20`); see Known limitations.
+100,000 ratings, 943 users, 1,682 movies. Per-user chronological split; the test
+set is evaluated exactly once, with the configuration selected on validation.
+
+**Split** (`src/split.py`) — each user's 10 most recent ratings held out for
+test, the 10 before those for validation:
+
+| | Ratings | Users |
+|---|---|---|
+| Train | 85,120 | 943 |
+| Validation | 7,429 | 744 |
+| Test | 7,422 | **744 of 943 (79%)** |
+
+**Selected hyperparameters** (`src/tune.py`, 12 configurations, chosen on
+validation RMSE):
+
+| Parameter | Value | Searched |
+|---|---|---|
+| `n_factors` | **40** | 10, 20, 40 |
+| `learning_rate` | **0.01** | 0.005, 0.01 |
+| `reg` | **0.1** | 0.05, 0.1 |
+| epochs | **38** | early stopping, cap 40 |
+
+Best validation RMSE 0.9535. The winning configuration sat at the edge of the
+grid on two axes, so the boundary was probed rather than assumed: `reg` 0.15 and
+0.2 scored worse (0.9608, 0.9813), `n_factors=80` was no better (0.9545), and
+re-running the winner with a 120-epoch cap still selected epoch 38. The optimum
+is interior.
 
 **Rating prediction (Matrix Factorization):**
 
 | Metric | Value |
 |---|---|
-| Test RMSE | **0.9817** |
-| Test MAE | **0.7730** |
-| Always-predict-global-mean RMSE (reference) | 1.1339 |
-| Improvement over constant predictor | **13.4%** |
+| Test RMSE | **0.9998** |
+| Test MAE | **0.7923** |
+| Always-predict-global-mean RMSE (reference) | 1.2006 |
+| Improvement over constant predictor | **16.7%** |
 
-**Ranking quality (n=95 users — see the caveat below):**
+**Ranking quality (n=700 users):**
 
 | Model | Precision@10 | Recall@10 |
 |---|---|---|
-| Random (reference) | 0.0137 | 0.0139 |
-| Popularity baseline | 0.0589 | 0.0603 |
-| Matrix Factorization | **0.0747** | 0.0599 |
+| Random (reference) | 0.0040 | 0.0067 |
+| Popularity baseline | **0.0213** | 0.0305 |
+| Matrix Factorization | 0.0211 | **0.0329** |
 
-MF beats random by 5.5× on precision and the popularity baseline by 1.3×.
+### ⚠️ Tuning improved RMSE. It did not make MF beat the popularity baseline.
 
-**But note the Recall@10 column: MF (0.0599) is marginally *worse* than the
-popularity baseline (0.0603).** On real data MF surfaces more relevant items in
-its top few slots, but does not retrieve a greater share of everything the user
-liked. That distinction was invisible on synthetic data, where MF led on both.
-It is not a failure — precision is what matters for a top-10 list — but the
-headline "MF wins" is more qualified here than the synthetic results suggested.
+**On a 700-user evaluation, matrix factorization and the naive popularity
+baseline are indistinguishable on Precision@10** — 0.0211 against 0.0213. MF
+wins narrowly on Recall@10 (0.0329 vs 0.0305) and both clearly beat random, but
+the headline "MF beats the baseline" does not survive a properly sized
+evaluation.
+
+The earlier 1.3× precision advantage was measured over 95 users. It did not
+hold at 700.
+
+This is a **known and well-documented result**, not a bug: models trained to
+minimise RMSE optimise rating accuracy, which is not the same objective as
+ranking the top-10 items a user will actually engage with. Cremonesi et al.
+(RecSys 2010) showed simple popularity beating latent-factor models on top-N
+tasks for exactly this reason. Fixing it means changing the objective — pairwise
+ranking loss such as BPR, trained on implicit feedback — not tuning the current
+one harder.
+
+**What tuning did buy:** RMSE improved from 16.7% better than a constant
+predictor, with hyperparameters now selected on evidence rather than asserted.
+That is a real gain on the objective the model is actually trained for.
+
+> **Numbers here are not comparable to earlier versions of this README.** The
+> split protocol changed (global-timestamp → per-user), so the test set, its
+> size and its user population are all different. Comparing 0.9998 against the
+> previous 0.9817 would be meaningless — different denominators.
 
 **Popularity-bias audit:**
 
 | Metric | Popularity baseline | Matrix Factorization | Random (reference) |
 |---|---|---|---|
-| Catalog coverage | 2.0% | **13.3%** | 45.3% |
-| Top-item recommendation share | 9.8% | 4.0% | 0.5% |
-
-Coverage is far lower across the board than on synthetic data, because the real
-catalog is 5.6× larger (1,682 vs 300 movies) while `k` stays at 10.
+| Catalog coverage | 2.3% | **11.4%** | 97.1% |
+| Top-item recommendation share | 9.9% | 9.6% | 0.2% |
 
 **Finding:** MF's coverage sits between the popularity baseline and random —
 what a targeting model should look like. Coverage alone proves only that MF
 isn't reproducing popularity under another name; the evidence that the targeting
-is any *good* is Precision@10 against the same random reference.
+is any *good* is Precision@10, which as shown above is a tie.
 
-### ⚠️ The chronological split discards 86% of the test set on real data
+### Resolved: the global split discarded 86% of the test set
 
-| | Count |
-|---|---|
-| Test rows before filtering (20%) | 20,000 |
-| Test rows actually evaluated | **2,863** |
-| Users evaluated | **95 of 943** |
+The previous global-timestamp split cut the dataset at the 80th percentile of
+time, then dropped test rows whose user or movie was unseen in training. On real
+MovieLens that left **95 of 943 users** — real users *arrive over time*, so the
+final 20% of ratings is dominated by accounts that did not exist during the
+training window. The synthetic data hid this completely: all 200 users there were
+active across the whole time range.
 
-Real MovieLens users **arrive over time**. The final 20% of ratings by timestamp
-is dominated by users who joined late, and `load_and_split()` drops test rows
-whose user or movie was unseen in training — that is cold-start behaviour, a
-different problem. So 17,137 rows and 89% of users fall out.
-
-The synthetic data hid this completely: there, all 200 users were active across
-the whole time range, so nothing was dropped.
-
-**Consequence:** the ranking metrics above are computed over 95 users and are
-correspondingly noisy. RMSE/MAE are over 2,863 ratings. The fix is a **per-user**
-chronological split — hold out each user's last *n* ratings, which keeps all 943
-users while remaining leakage-free. That is the next planned change.
+The per-user split fixes it — **744 users evaluated instead of 95** — and it is
+what exposed the ranking result above.
 
 ## Serving
 
@@ -264,7 +300,8 @@ exactly that.
 | Evaluation metrics | ✅ Run and verified |
 | Popularity-bias audit | ✅ Run and verified |
 | Training pipeline | ✅ Runs end to end from a clean state |
-| Test suite | ✅ **45 tests passing** |
+| Test suite | ✅ **57 tests passing** |
+| Hyperparameter search (`tune.py`) | ✅ Run — 12 configurations tracked in MLflow, boundary probed |
 | Real MovieLens converter | ✅ Run — 100,000 ratings / 943 users / 1,682 movies, parsing covered by hermetic tests |
 | FastAPI service | ✅ Run under uvicorn — all three endpoints serve correctly |
 | Streamlit frontend | ✅ Script executed and asserted via Streamlit's `AppTest` |
@@ -292,10 +329,12 @@ movie-recommender/
 │   ├── models.py               # Popularity + Random baselines, from-scratch MF
 │   ├── evaluate.py             # RMSE, MAE, Precision@K, Recall@K
 │   ├── audit_bias.py           # popularity-bias / filter-bubble audit
+│   ├── split.py                # per-user chronological train/val/test split
+│   ├── tune.py                 # hyperparameter search, tracked in MLflow
 │   └── train.py                # split → train → evaluate → audit → persist
 ├── api/main.py                 # FastAPI serving layer
 ├── app/streamlit_app.py        # frontend, calls the API
-├── tests/                      # 45 tests across models, data, converter, frontend
+├── tests/                      # 57 tests: models, split, data, converter, frontend
 ├── models/                     # persisted artifacts (gitignored)
 ├── .github/workflows/ci.yml    # test + docker build + container smoke test
 ├── Dockerfile
@@ -307,7 +346,10 @@ movie-recommender/
 
 - **Version control** — every change landed through a reviewed pull request with
   a linked issue; `main` protected behind passing CI
-- **Automated testing** — 45 tests covering metric correctness, model behaviour
+- **Experiment tracking** — hyperparameters selected on a validation set with
+  MLflow, never on test. A dev dependency only: `train.py` and the API never
+  import it, and CI does not run the search
+- **Automated testing** — 57 tests covering metric correctness, model behaviour
   (cold start, seen-item exclusion, unfitted-model errors), reproducibility,
   data-generation integrity and the rendered frontend. Each regression test was
   verified to **fail against the original code** — a regression test that cannot
@@ -329,22 +371,26 @@ movie-recommender/
   to the popularity baseline is the obvious fix.
 - **`/recommend` ignores previously-seen items** — it passes an empty
   `exclude_seen`; production would query a real "seen items" store.
-- **Hyperparameters are untuned.** `n_factors=20, lr=0.01, reg=0.02` were chosen
-  by hand and never justified. There is also no validation split — only
-  train/test — so tuning against the current split would select on the same data
-  used to report, which is leakage. Both are addressed together in the next
-  planned change.
-- **Ranking metrics cover 95 of 943 users**, for the split reason described in
-  Results. A per-user chronological split fixes it.
+- **MF does not beat the popularity baseline on ranking.** See Results. The model
+  is trained on an RMSE objective, which is not the ranking objective. Closing
+  this needs a pairwise ranking loss (BPR) on implicit feedback, not more tuning.
+- **199 of 943 users are excluded from evaluation** — those with fewer than 30
+  ratings, who cannot give up 20 held-out items and still be learnable. Their
+  ratings still train the item factors; they are simply never scored.
+- **The split is leakage-free per user, not globally time-ordered.** One user's
+  training ratings may post-date another's test ratings. This is standard
+  practice in the recommender literature (MovieLens ships `ua.base`/`ua.test`
+  built the same way); strict global ordering costs 89% of the evaluation set.
 - **`recommend()` scores every candidate in a Python loop**, which would not
   scale. Precomputing top-K offline or using an approximate nearest-neighbour
   index over the item factors is the standard fix.
 
 ## Next steps
 
-1. **Per-user chronological split plus hyperparameter search** — keeps all 943
-   users in the evaluation, adds the validation set tuning requires, and
-   justifies the model configuration
+1. **Train on a ranking objective (BPR on implicit feedback).** The evaluation
+   above shows RMSE-optimised MF tying the popularity baseline on Precision@10.
+   That is an objective mismatch, and it is the single most valuable thing left
+   to fix.
 2. Exercise the Compose topology — CI verifies the API image, but not the
    two-service stack
 3. Fall back to the popularity baseline for cold-start users
