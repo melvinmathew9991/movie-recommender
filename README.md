@@ -73,7 +73,48 @@ well while just recommending whatever is already popular to everyone. The audit
 measures **catalog coverage** (what fraction of the catalog ever gets
 recommended) and **top-item share** (how concentrated recommendations are).
 
-## ⚠️ The reported results do not hold up
+## The defect that invalidated every earlier result
+
+The reference baselines showed the model was worse than a constant predictor.
+The cause turned out not to be the model.
+
+`generate_sample_data.py` drew every rating from a single fixed distribution,
+independent of **both** the user and the movie. The dataset contained no
+user–item preference structure at all, so there was nothing for a recommender to
+recover.
+
+Confirmed by permutation test — shuffling the ratings at random and recomputing
+the per-user and per-item spread produced *the same or greater* spread than the
+real data:
+
+| Statistic | Before fix | After fix |
+|---|---|---|
+| Per-user mean-rating spread | **z = −2.59** | z = +27.92 |
+| Per-item mean-rating spread | **z = −1.75** | z = +29.72 |
+
+A negative z means the observed structure is indistinguishable from noise.
+
+**Fixed** by generating ratings from a latent taste model — user preference
+vectors, movie attribute vectors, bias terms, and a popularity/quality
+correlation — deliberately the same family matrix factorization tries to
+recover, so the pipeline is exercised against data where personalization
+genuinely exists.
+
+### What the numbers were, and what they became
+
+| Measure | Before | After |
+|---|---|---|
+| MF test RMSE vs constant predictor | 1.1998 vs 1.1246 — **worse than a constant** | 0.8288 vs 1.0005 — **17.2% better** |
+| MF Precision@10 vs random | 0.0610 vs 0.0370 | 0.1495 vs 0.0355 |
+| Popularity baseline Precision@10 | 0.0125 — **below random** | 0.0960 — a real competitor |
+
+The metrics were never arithmetically wrong. They were uninterpretable, and the
+data underneath them was empty.
+
+<details>
+<summary>The original, invalidated results (kept for the record)</summary>
+
+## ⚠️ The reported results did not hold up
 
 Every metric this project published was reported without a reference point. Two
 were added — predicting the global mean for every rating, and recommending at
@@ -118,6 +159,46 @@ out *why* the model can't beat a constant.
 
 The reference baselines are now permanent parts of the pipeline, and training
 prints an explicit `WARNING` if the model ever fails to beat either.
+
+</details>
+
+## Results (synthetic data — re-validate on real MovieLens 100K)
+
+**Rating prediction (Matrix Factorization):**
+
+| Metric | Value |
+|---|---|
+| Test RMSE | **0.8288** |
+| Test MAE | **0.6682** |
+| Always-predict-global-mean RMSE (reference) | 1.0005 |
+| Improvement over constant predictor | **17.2%** |
+
+**Ranking quality (n=200 users):**
+
+| Model | Precision@10 | Recall@10 |
+|---|---|---|
+| Random (reference) | 0.0355 | 0.0377 |
+| Popularity baseline | 0.0960 | 0.1110 |
+| Matrix Factorization | **0.1495** | **0.1802** |
+
+MF beats random by 4.2× and the popularity baseline by 1.6×. The second
+comparison is the meaningful one — beating random only proves the model learned
+*something*.
+
+**Popularity-bias audit:**
+
+| Metric | Popularity baseline | Matrix Factorization | Random (reference) |
+|---|---|---|---|
+| Catalog coverage | 7.3% | **32.3%** | 97.7% |
+| Top-item recommendation share | 9.2% | 7.0% | 0.8% |
+
+**Finding:** MF's coverage sits between the popularity baseline and random,
+which is what a targeting model should look like — concentrating on relevant
+items without collapsing onto the globally popular ones. Coverage alone proves
+only that MF isn't reproducing popularity under another name; the evidence that
+the targeting is any *good* is Precision@10 against the same random reference.
+
+These numbers reproduce bit-identically from a clean regenerate-and-retrain.
 
 ## Planned
 
