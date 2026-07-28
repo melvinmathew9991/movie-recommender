@@ -233,11 +233,18 @@ exactly that.
 | Test suite | ✅ **34 tests passing** |
 | FastAPI service | ✅ Run under uvicorn — all three endpoints serve correctly |
 | Streamlit frontend | ✅ Script executed and asserted via Streamlit's `AppTest` |
-| Dockerfile / docker-compose | ⚠️ Written, **not built locally** — no Docker daemon on the dev machine; the CI `docker-build` job is what exercises them |
+| Dockerfile | ✅ **Built and smoke-tested in CI** — image assembles, container starts, `/health` reports `model_loaded: true`, `/recommend` serves. Not built on the dev machine (no Docker daemon there) |
+| docker-compose | ⚠️ Written, **never run** — Compose is not exercised by CI |
 | GitHub Actions CI | ✅ Runs on every pull request |
 
-This distinction is deliberate. The container layer is written and internally
-consistent, but it has never been built on the development machine.
+The distinction between the Dockerfile and Compose is deliberate. CI builds the
+image and asserts it actually serves, so the container layer is genuinely
+verified — but it verifies the *single API image*, not the two-service Compose
+topology. Nothing has run `docker compose up`, so that row stays ⚠️.
+
+Building an image proves it assembles; running it and calling its endpoints
+proves it works. The CI job does both, which is why this row moved from
+"written" to "verified".
 
 ## Architecture
 
@@ -296,7 +303,8 @@ movie-recommender/
 ## Next steps
 
 1. Swap in the real MovieLens 100K dataset and re-run; replace the Results section
-2. Build and run the container locally once Docker is available
+2. Exercise the Compose topology — CI verifies the API image, but not the
+   two-service stack
 3. Fall back to the popularity baseline for cold-start users
 4. Add item-based collaborative filtering as a fourth comparison point
 
