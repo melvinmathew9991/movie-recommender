@@ -11,26 +11,31 @@ testing and CI.
 ```bash
 pip install -r requirements-dev.txt   # runtime + test dependencies
 
-python src/generate_sample_data.py    # writes data/raw/*.csv
+python src/fetch_movielens.py         # real MovieLens 100K (needs network)
+python src/train.py
 pytest
 ```
 
 ## Data
 
-The project builds against a **schema-accurate synthetic sample** matching the
-MovieLens 100K format — 200 users, 300 movies, 15,000 ratings — so the pipeline
-can be developed and tested without depending on an external download.
+The results below are on the **real MovieLens 100K dataset** — 100,000 ratings
+from 943 users on 1,682 movies, collected by GroupLens Research at the
+University of Minnesota.
 
-`data/raw/*.csv` is gitignored: it is regenerable output, not source. Run the
-generator after cloning.
+`python src/fetch_movielens.py` downloads it and converts it into this project's
+schema. The raw files need real conversion work: ratings are tab-separated,
+movies are pipe-separated with 19 binary genre flags rather than a genre name,
+the release year is buried in a `01-Jan-1995` date field, and **`u.item` is
+Latin-1** — reading it as UTF-8 fails on titles like *Les Misérables*.
 
-**This is not the real dataset.** Before publishing any results, swap in the
-real MovieLens 100K data:
-https://files.grouplens.org/datasets/movielens/ml-100k.zip
+### A synthetic generator also ships
 
-Movie popularity follows a Zipf-like distribution — a few titles get rated
-heavily, most rarely — because a flat distribution would make the planned
-popularity-bias audit meaningless.
+`python src/generate_sample_data.py` produces a schema-accurate synthetic sample
+(200 users, 300 movies, 15,000 ratings) from a latent taste model. This is what
+**CI uses**: tests stay fast and hermetic, with no network dependency and no
+5 MB download on every run.
+
+`data/raw/*.csv` is gitignored either way — it is regenerable output, not source.
 
 ## Models
 
@@ -162,43 +167,72 @@ prints an explicit `WARNING` if the model ever fails to beat either.
 
 </details>
 
-## Results (synthetic data — re-validate on real MovieLens 100K)
+## Results — real MovieLens 100K
+
+100,000 ratings, 943 users, 1,682 movies. Hyperparameters are the untuned
+defaults (`n_factors=20, lr=0.01, reg=0.02, n_epochs=20`); see Known limitations.
 
 **Rating prediction (Matrix Factorization):**
 
 | Metric | Value |
 |---|---|
-| Test RMSE | **0.8288** |
-| Test MAE | **0.6682** |
-| Always-predict-global-mean RMSE (reference) | 1.0005 |
-| Improvement over constant predictor | **17.2%** |
+| Test RMSE | **0.9817** |
+| Test MAE | **0.7730** |
+| Always-predict-global-mean RMSE (reference) | 1.1339 |
+| Improvement over constant predictor | **13.4%** |
 
-**Ranking quality (n=200 users):**
+**Ranking quality (n=95 users — see the caveat below):**
 
 | Model | Precision@10 | Recall@10 |
 |---|---|---|
-| Random (reference) | 0.0355 | 0.0377 |
-| Popularity baseline | 0.0960 | 0.1110 |
-| Matrix Factorization | **0.1495** | **0.1802** |
+| Random (reference) | 0.0137 | 0.0139 |
+| Popularity baseline | 0.0589 | 0.0603 |
+| Matrix Factorization | **0.0747** | 0.0599 |
 
-MF beats random by 4.2× and the popularity baseline by 1.6×. The second
-comparison is the meaningful one — beating random only proves the model learned
-*something*.
+MF beats random by 5.5× on precision and the popularity baseline by 1.3×.
+
+**But note the Recall@10 column: MF (0.0599) is marginally *worse* than the
+popularity baseline (0.0603).** On real data MF surfaces more relevant items in
+its top few slots, but does not retrieve a greater share of everything the user
+liked. That distinction was invisible on synthetic data, where MF led on both.
+It is not a failure — precision is what matters for a top-10 list — but the
+headline "MF wins" is more qualified here than the synthetic results suggested.
 
 **Popularity-bias audit:**
 
 | Metric | Popularity baseline | Matrix Factorization | Random (reference) |
 |---|---|---|---|
-| Catalog coverage | 7.3% | **32.3%** | 97.7% |
-| Top-item recommendation share | 9.2% | 7.0% | 0.8% |
+| Catalog coverage | 2.0% | **13.3%** | 45.3% |
+| Top-item recommendation share | 9.8% | 4.0% | 0.5% |
 
-**Finding:** MF's coverage sits between the popularity baseline and random,
-which is what a targeting model should look like — concentrating on relevant
-items without collapsing onto the globally popular ones. Coverage alone proves
-only that MF isn't reproducing popularity under another name; the evidence that
-the targeting is any *good* is Precision@10 against the same random reference.
+Coverage is far lower across the board than on synthetic data, because the real
+catalog is 5.6× larger (1,682 vs 300 movies) while `k` stays at 10.
 
-These numbers reproduce bit-identically from a clean regenerate-and-retrain.
+**Finding:** MF's coverage sits between the popularity baseline and random —
+what a targeting model should look like. Coverage alone proves only that MF
+isn't reproducing popularity under another name; the evidence that the targeting
+is any *good* is Precision@10 against the same random reference.
+
+### ⚠️ The chronological split discards 86% of the test set on real data
+
+| | Count |
+|---|---|
+| Test rows before filtering (20%) | 20,000 |
+| Test rows actually evaluated | **2,863** |
+| Users evaluated | **95 of 943** |
+
+Real MovieLens users **arrive over time**. The final 20% of ratings by timestamp
+is dominated by users who joined late, and `load_and_split()` drops test rows
+whose user or movie was unseen in training — that is cold-start behaviour, a
+different problem. So 17,137 rows and 89% of users fall out.
+
+The synthetic data hid this completely: there, all 200 users were active across
+the whole time range, so nothing was dropped.
+
+**Consequence:** the ranking metrics above are computed over 95 users and are
+correspondingly noisy. RMSE/MAE are over 2,863 ratings. The fix is a **per-user**
+chronological split — hold out each user's last *n* ratings, which keeps all 943
+users while remaining leakage-free. That is the next planned change.
 
 ## Serving
 
@@ -230,7 +264,8 @@ exactly that.
 | Evaluation metrics | ✅ Run and verified |
 | Popularity-bias audit | ✅ Run and verified |
 | Training pipeline | ✅ Runs end to end from a clean state |
-| Test suite | ✅ **34 tests passing** |
+| Test suite | ✅ **45 tests passing** |
+| Real MovieLens converter | ✅ Run — 100,000 ratings / 943 users / 1,682 movies, parsing covered by hermetic tests |
 | FastAPI service | ✅ Run under uvicorn — all three endpoints serve correctly |
 | Streamlit frontend | ✅ Script executed and asserted via Streamlit's `AppTest` |
 | Dockerfile | ✅ **Built and smoke-tested in CI** — image assembles, container starts, `/health` reports `model_loaded: true`, `/recommend` serves. Not built on the dev machine (no Docker daemon there) |
@@ -252,14 +287,15 @@ proves it works. The CI job does both, which is why this row moved from
 movie-recommender/
 ├── data/raw/                   # source CSVs (gitignored — regenerate)
 ├── src/
-│   ├── generate_sample_data.py # latent-factor synthetic data generator
+│   ├── fetch_movielens.py      # downloads + converts the real MovieLens 100K
+│   ├── generate_sample_data.py # latent-factor synthetic data generator (CI)
 │   ├── models.py               # Popularity + Random baselines, from-scratch MF
 │   ├── evaluate.py             # RMSE, MAE, Precision@K, Recall@K
 │   ├── audit_bias.py           # popularity-bias / filter-bubble audit
 │   └── train.py                # split → train → evaluate → audit → persist
 ├── api/main.py                 # FastAPI serving layer
 ├── app/streamlit_app.py        # frontend, calls the API
-├── tests/                      # 34 tests across models, data and frontend
+├── tests/                      # 45 tests across models, data, converter, frontend
 ├── models/                     # persisted artifacts (gitignored)
 ├── .github/workflows/ci.yml    # test + docker build + container smoke test
 ├── Dockerfile
@@ -271,7 +307,7 @@ movie-recommender/
 
 - **Version control** — every change landed through a reviewed pull request with
   a linked issue; `main` protected behind passing CI
-- **Automated testing** — 34 tests covering metric correctness, model behaviour
+- **Automated testing** — 45 tests covering metric correctness, model behaviour
   (cold start, seen-item exclusion, unfitted-model errors), reproducibility,
   data-generation integrity and the rendered frontend. Each regression test was
   verified to **fail against the original code** — a regression test that cannot
@@ -293,16 +329,22 @@ movie-recommender/
   to the popularity baseline is the obvious fix.
 - **`/recommend` ignores previously-seen items** — it passes an empty
   `exclude_seen`; production would query a real "seen items" store.
-- **Results are on synthetic data**, generated by a latent-factor model of the
-  same family MF recovers. That makes the pipeline honest to evaluate, but it
-  also makes the task easier than real human rating behaviour.
+- **Hyperparameters are untuned.** `n_factors=20, lr=0.01, reg=0.02` were chosen
+  by hand and never justified. There is also no validation split — only
+  train/test — so tuning against the current split would select on the same data
+  used to report, which is leakage. Both are addressed together in the next
+  planned change.
+- **Ranking metrics cover 95 of 943 users**, for the split reason described in
+  Results. A per-user chronological split fixes it.
 - **`recommend()` scores every candidate in a Python loop**, which would not
   scale. Precomputing top-K offline or using an approximate nearest-neighbour
   index over the item factors is the standard fix.
 
 ## Next steps
 
-1. Swap in the real MovieLens 100K dataset and re-run; replace the Results section
+1. **Per-user chronological split plus hyperparameter search** — keeps all 943
+   users in the evaluation, adds the validation set tuning requires, and
+   justifies the model configuration
 2. Exercise the Compose topology — CI verifies the API image, but not the
    two-service stack
 3. Fall back to the popularity baseline for cold-start users
