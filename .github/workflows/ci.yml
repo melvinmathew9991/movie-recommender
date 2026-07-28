@@ -29,3 +29,8 @@ jobs:
 
       - name: Run test suite
         run: pytest -v
+
+      # Unit tests exercise the pieces; this proves the whole pipeline runs
+      # start to finish -- load, split, train both models, evaluate, audit, persist.
+      - name: Train model (smoke test -- confirms the pipeline runs end to end)
+        run: python src/train.py
