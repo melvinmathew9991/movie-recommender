@@ -1,0 +1,40 @@
+# docker-compose.yml -- runs the full stack (API + frontend) as two
+# separate services, the standard pattern for a full-stack ML application
+# rather than bundling everything into one container.
+
+services:
+  api:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    ports:
+      - "8000:8000"
+    volumes:
+      # Allows retraining without rebuilding the image. Note the trade-off: this
+      # mount shadows the models/ directory baked into the image, so an empty
+      # host models/ leaves the API with no artifact to load and it will exit at
+      # startup. Run `python src/train.py` before `docker compose up`.
+      - ./models:/app/models
+    healthcheck:
+      test: ["CMD", "python", "-c", "import urllib.request; urllib.request.urlopen('http://localhost:8000/health')"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  frontend:
+    image: python:3.11-slim
+    working_dir: /app
+    volumes:
+      - .:/app
+    # Installs from requirements.txt rather than naming packages inline: the
+    # inline list was unpinned, so the frontend could silently run against
+    # different library versions than everything else in the project.
+    command: >
+      sh -c "pip install --no-cache-dir -r requirements.txt &&
+             streamlit run app/streamlit_app.py --server.address 0.0.0.0"
+    ports:
+      - "8501:8501"
+    depends_on:
+      - api
+    environment:
+      - API_BASE=http://api:8000
