@@ -8,8 +8,16 @@ venv/
 .pytest_cache/
 .streamlit/
 
-# Model artifacts - regenerate via src/train.py, don't commit large binaries
+# Model artifacts - regenerate via src/train.py, don't commit large binaries.
+# models/best_params.json is deliberately NOT ignored: it is the tuning result
+# train.py reads, small and meaningful in review.
 models/*.pkl
+
+# MLflow local tracking store, written by src/tune.py.
+# MLflow 3.x defaults to the sqlite file; older versions use the mlruns/ tree.
+mlflow.db
+mlruns/
+mlartifacts/
 
 # Data - regenerate via src/generate_sample_data.py, or download the real dataset
 data/raw/*.csv

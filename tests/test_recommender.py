@@ -154,6 +154,59 @@ def test_audit_bias_handles_a_model_that_recommends_nothing():
     assert result["catalog_coverage"] == 0.0
 
 
+# --- Early stopping on validation ---------------------------------------------
+
+
+def _split_toy(df, n_holdout=3):
+    """Last n_holdout rows per user as a stand-in validation set."""
+    df = df.sort_values(["user_id", "timestamp"])
+    val = df.groupby("user_id").tail(1)
+    train = df.drop(val.index)
+    return train, val
+
+
+def test_fit_without_validation_leaves_early_stopping_state_unset():
+    """Passing no validation set must behave exactly as before."""
+    df = _toy_ratings_df()
+    model = MatrixFactorizationRecommender(n_factors=2, n_epochs=3, random_state=42).fit(df)
+    assert model.best_epoch_ is None
+    assert model.best_val_rmse_ is None
+
+
+def test_fit_with_validation_records_the_best_epoch():
+    df = _toy_ratings_df()
+    train, val = _split_toy(df)
+    model = MatrixFactorizationRecommender(n_factors=2, n_epochs=8, random_state=42)
+    model.fit(train, validation_df=val, patience=2)
+
+    assert model.best_epoch_ is not None
+    assert 1 <= model.best_epoch_ <= 8
+    assert model.best_val_rmse_ == pytest.approx(min(model.val_history_))
+
+
+def test_early_stopping_halts_before_the_epoch_cap():
+    """With tiny data, validation error stops improving quickly."""
+    df = _toy_ratings_df()
+    train, val = _split_toy(df)
+    model = MatrixFactorizationRecommender(n_factors=2, n_epochs=50, random_state=42)
+    model.fit(train, validation_df=val, patience=2)
+
+    assert len(model.val_history_) < 50, "should have stopped before the cap"
+
+
+def test_best_parameters_are_restored_not_the_final_ones():
+    """
+    Early stopping is pointless if the model hands back the overfitted weights
+    from the last epoch. The restored model must score the best validation RMSE.
+    """
+    df = _toy_ratings_df()
+    train, val = _split_toy(df)
+    model = MatrixFactorizationRecommender(n_factors=2, n_epochs=30, random_state=42)
+    model.fit(train, validation_df=val, patience=2)
+
+    assert model._validation_rmse(val) == pytest.approx(model.best_val_rmse_, abs=1e-9)
+
+
 # --- Random reference baseline ------------------------------------------------
 
 

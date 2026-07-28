@@ -2,16 +2,25 @@
 train.py
 
 End-to-end training pipeline:
-1. Load data, split chronologically by timestamp (not randomly -- a
-   random split would leak future ratings into training).
-2. Train the popularity baseline and the from-scratch matrix
-   factorization model.
-3. Evaluate on RMSE/MAE (rating prediction) and Precision@K/Recall@K
-   (ranking quality).
-4. Run the popularity-bias audit comparing the two models.
+1. Load data and split per-user chronologically into train / validation / test
+   (see split.py for why this replaced the global-timestamp split).
+2. Train the popularity baseline, the random reference, and the from-scratch
+   matrix factorization model.
+3. Evaluate on RMSE/MAE (rating prediction) and Precision@K/Recall@K (ranking),
+   always against a constant predictor and random selection.
+4. Run the popularity-bias audit comparing the models.
 5. Persist the trained MF model (pickle) for the API to load.
+
+Hyperparameters come from models/best_params.json when present -- written by
+`python src/tune.py`, which selects them on the validation set. Without that
+file the module defaults are used and the run says so.
+
+The validation set does double duty: it selects hyperparameters (in tune.py) and
+stops training at the right epoch here. The test set is touched exactly once,
+at the end.
 """
 
+import json
 import pickle
 import pandas as pd
 from pathlib import Path
@@ -20,9 +29,15 @@ from models import (PopularityRecommender, MatrixFactorizationRecommender,
                     RandomRecommender)
 from evaluate import rmse, mae, evaluate_ranking
 from audit_bias import audit_popularity_bias, compare_bias
+from split import per_user_chronological_split, split_summary, build_seen_dict
 
 RAW_DIR = Path(__file__).resolve().parents[1] / "data" / "raw"
 MODELS_DIR = Path(__file__).resolve().parents[1] / "models"
+BEST_PARAMS_PATH = MODELS_DIR / "best_params.json"
+
+DEFAULT_PARAMS = {"n_factors": 20, "learning_rate": 0.01, "reg": 0.02}
+MAX_EPOCHS = 40
+PATIENCE = 3
 
 
 def _require_raw_data():
@@ -36,41 +51,44 @@ def _require_raw_data():
     if missing:
         raise SystemExit(
             f"Missing input data: {', '.join(missing)} (expected in {RAW_DIR}).\n"
-            "Generate the sample dataset first:\n"
+            "Fetch the real dataset:\n"
+            "    python src/fetch_movielens.py\n"
+            "or generate the synthetic sample:\n"
             "    python src/generate_sample_data.py"
         )
 
 
-def load_and_split(test_frac: float = 0.2):
+def load_and_split():
     _require_raw_data()
     ratings = pd.read_csv(RAW_DIR / "ratings.csv")
-    ratings = ratings.sort_values("timestamp").reset_index(drop=True)
-
-    cutoff_idx = int(len(ratings) * (1 - test_frac))
-    train_df = ratings.iloc[:cutoff_idx].copy()
-    test_df = ratings.iloc[cutoff_idx:].copy()
-
-    # Only evaluate on users/items seen during training -- otherwise we're
-    # testing cold-start behavior, which is a different (real, but separate) problem
-    train_users = set(train_df["user_id"])
-    train_movies = set(train_df["movie_id"])
-    test_df = test_df[test_df["user_id"].isin(train_users) & test_df["movie_id"].isin(train_movies)]
-
-    return train_df, test_df
+    train_df, val_df, test_df = per_user_chronological_split(ratings)
+    return ratings, train_df, val_df, test_df
 
 
-def build_seen_dict(train_df) -> dict:
-    return train_df.groupby("user_id")["movie_id"].apply(set).to_dict()
+def load_hyperparameters():
+    """Tuned parameters if tune.py has run, otherwise the hand-set defaults."""
+    if BEST_PARAMS_PATH.exists():
+        saved = json.loads(BEST_PARAMS_PATH.read_text())
+        params = {k: saved[k] for k in DEFAULT_PARAMS if k in saved}
+        return params, True
+    return dict(DEFAULT_PARAMS), False
 
 
 def main():
-    print("Loading and splitting data (chronological, leakage-free)...")
-    train_df, test_df = load_and_split()
-    print(f"  Train: {len(train_df)} ratings | Test: {len(test_df)} ratings")
+    print("Loading and splitting data (per-user chronological)...")
+    ratings, train_df, val_df, test_df = load_and_split()
+    print(split_summary(ratings, train_df, val_df, test_df))
 
     seen_by_user = build_seen_dict(train_df)
     all_movie_ids = sorted(pd.read_csv(RAW_DIR / "movies.csv")["movie_id"].unique())
     test_users = test_df["user_id"].unique().tolist()
+
+    params, tuned = load_hyperparameters()
+    if tuned:
+        print(f"\nUsing tuned hyperparameters from {BEST_PARAMS_PATH.name}: {params}")
+    else:
+        print(f"\nNo tuned parameters found; using defaults: {params}")
+        print("  (run `python src/tune.py` to select them on the validation set)")
 
     # --- Baselines ---
     print("\nTraining popularity baseline...")
@@ -78,13 +96,15 @@ def main():
     rand_model = RandomRecommender(random_state=42).fit(train_df)
 
     # --- Matrix factorization (from scratch, SGD) ---
-    print("Training matrix factorization model (SGD, this may take a moment)...")
+    print("Training matrix factorization model (SGD, early stopping on validation)...")
     mf_model = MatrixFactorizationRecommender(
-        n_factors=20, learning_rate=0.01, reg=0.02, n_epochs=20, random_state=42
-    ).fit(train_df, verbose=True)
+        n_epochs=MAX_EPOCHS, random_state=42, **params
+    ).fit(train_df, verbose=True, validation_df=val_df, patience=PATIENCE)
+    print(f"  stopped at epoch {mf_model.best_epoch_} "
+          f"(best validation RMSE {mf_model.best_val_rmse_:.4f})")
 
-    # --- Rating-prediction accuracy (MF only -- popularity model doesn't predict individual ratings) ---
-    print("\nEvaluating rating-prediction accuracy (Matrix Factorization)...")
+    # --- Rating-prediction accuracy on the TEST set (touched once) ---
+    print("\nEvaluating rating-prediction accuracy on the held-out test set...")
     test_preds = [mf_model.predict(row.user_id, row.movie_id) for row in test_df.itertuples()]
     test_true = test_df["rating"].values
 
@@ -126,6 +146,8 @@ def main():
     print("\n" + compare_bias(pop_bias, mf_bias, rand_bias))
 
     # --- Persist the MF model ---
+    # Created here rather than at import time so that importing this module has
+    # no filesystem side effects.
     MODELS_DIR.mkdir(parents=True, exist_ok=True)
     model_path = MODELS_DIR / "mf_model.pkl"
     with open(model_path, "wb") as f:

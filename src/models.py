@@ -113,7 +113,27 @@ class MatrixFactorizationRecommender:
         self.user_id_map_ = None
         self.item_id_map_ = None
 
-    def fit(self, ratings_df, verbose: bool = False):
+        # Populated only when fit() is given a validation set
+        self.best_epoch_ = None
+        self.best_val_rmse_ = None
+        self.val_history_ = None
+
+    def _validation_rmse(self, val_df) -> float:
+        preds = np.array([self.predict(u, i) for u, i
+                          in zip(val_df["user_id"].values, val_df["movie_id"].values)])
+        actual = val_df["rating"].values.astype(float)
+        return float(np.sqrt(np.mean((actual - preds) ** 2)))
+
+    def _snapshot(self):
+        return (self.user_factors_.copy(), self.item_factors_.copy(),
+                self.user_bias_.copy(), self.item_bias_.copy())
+
+    def _restore(self, snap):
+        (self.user_factors_, self.item_factors_,
+         self.user_bias_, self.item_bias_) = snap
+
+    def fit(self, ratings_df, verbose: bool = False,
+            validation_df=None, patience: int = 3):
         users = ratings_df["user_id"].unique()
         items = ratings_df["movie_id"].unique()
         self.user_id_map_ = {u: idx for idx, u in enumerate(users)}
@@ -130,6 +150,14 @@ class MatrixFactorizationRecommender:
         u_idx = ratings_df["user_id"].map(self.user_id_map_).values
         i_idx = ratings_df["movie_id"].map(self.item_id_map_).values
         r_vals = ratings_df["rating"].values.astype(float)
+
+        # Early stopping bookkeeping. Tuning the epoch count by grid search would
+        # need a separate full training run per candidate; watching validation
+        # error while training gets the same answer from one run.
+        best_val = np.inf
+        best_snapshot = None
+        epochs_since_improvement = 0
+        self.val_history_ = []
 
         n = len(r_vals)
         for epoch in range(self.n_epochs):
@@ -150,9 +178,37 @@ class MatrixFactorizationRecommender:
                 self.user_factors_[u] += self.lr * (err * self.item_factors_[i] - self.reg * self.user_factors_[u])
                 self.item_factors_[i] += self.lr * (err * uf_old - self.reg * self.item_factors_[i])
 
+            train_rmse = np.sqrt(total_sq_err / n)
+
+            if validation_df is None:
+                if verbose:
+                    print(f"  epoch {epoch + 1}/{self.n_epochs}  train RMSE: {train_rmse:.4f}")
+                continue
+
+            val_rmse = self._validation_rmse(validation_df)
+            self.val_history_.append(val_rmse)
             if verbose:
-                rmse = np.sqrt(total_sq_err / n)
-                print(f"  epoch {epoch + 1}/{self.n_epochs}  train RMSE: {rmse:.4f}")
+                print(f"  epoch {epoch + 1}/{self.n_epochs}  "
+                      f"train RMSE: {train_rmse:.4f}  val RMSE: {val_rmse:.4f}")
+
+            if val_rmse < best_val:
+                best_val = val_rmse
+                best_snapshot = self._snapshot()
+                self.best_epoch_ = epoch + 1
+                epochs_since_improvement = 0
+            else:
+                epochs_since_improvement += 1
+                if epochs_since_improvement >= patience:
+                    if verbose:
+                        print(f"  early stop at epoch {epoch + 1}; "
+                              f"best was epoch {self.best_epoch_} (val RMSE {best_val:.4f})")
+                    break
+
+        # Keep the parameters that scored best on validation, not the last ones --
+        # otherwise early stopping still hands back an overfitted model.
+        if validation_df is not None and best_snapshot is not None:
+            self._restore(best_snapshot)
+            self.best_val_rmse_ = float(best_val)
 
         return self
 

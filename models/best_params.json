@@ -1,0 +1,7 @@
+{
+  "n_factors": 40,
+  "learning_rate": 0.01,
+  "reg": 0.1,
+  "best_epoch": 38,
+  "val_rmse": 0.9535326307629803
+}
