@@ -1,0 +1,27 @@
+__pycache__/
+*.pyc
+.venv/
+venv/
+*.egg-info/
+
+# Test / tooling caches
+.pytest_cache/
+.streamlit/
+
+# Model artifacts - regenerate via src/train.py, don't commit large binaries
+models/*.pkl
+
+# Data - regenerate via src/generate_sample_data.py, or download the real dataset
+data/raw/*.csv
+
+# Personal working documents - not project documentation
+GIT_MIGRATION_PLAN.md
+INTERVIEW_PREP.md
+MIGRATION_RUNBOOK.md
+
+# IDE
+.vscode/
+.idea/
+
+# OS
+.DS_Store
