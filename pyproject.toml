@@ -1,0 +1,17 @@
+# Tool configuration.
+#
+# Deliberately no [project] / [build-system] table: this repository is a runnable
+# application, not a distributable package. src/ has no __init__.py and is not
+# importable as one, so declaring build metadata would advertise an installable
+# artifact that does not exist.
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+
+# Puts src/ on sys.path for the test run. This replaces the per-file
+# `sys.path.insert(...)` preamble the test modules used to carry, and it is also
+# what lets `from models import ...` resolve to src/models.py rather than the
+# models/ artifact directory in the project root.
+pythonpath = ["src"]
+
+addopts = "-q --strict-markers"

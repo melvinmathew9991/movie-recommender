@@ -1,0 +1,5 @@
+# Development/test dependencies. Installs the runtime set as well, so a single
+# `pip install -r requirements-dev.txt` gives a complete working environment.
+-r requirements.txt
+
+pytest>=8.0,<9.0
