@@ -11,9 +11,10 @@ import pandas as pd
 import numpy as np
 import pytest
 
-from models import PopularityRecommender, MatrixFactorizationRecommender
+from models import (PopularityRecommender, MatrixFactorizationRecommender,
+                    RandomRecommender)
 from evaluate import rmse, mae, precision_at_k, recall_at_k
-from audit_bias import audit_popularity_bias
+from audit_bias import audit_popularity_bias, compare_bias
 
 
 def _toy_ratings_df():
@@ -153,12 +154,56 @@ def test_audit_bias_handles_a_model_that_recommends_nothing():
     assert result["catalog_coverage"] == 0.0
 
 
+# --- Random reference baseline ------------------------------------------------
+
+
+def test_random_recommender_is_reproducible():
+    df = _toy_ratings_df()
+    a = RandomRecommender(random_state=7).fit(df).recommend(1, k=3)
+    b = RandomRecommender(random_state=7).fit(df).recommend(1, k=3)
+    assert a == b, "Same seed should give the same reference picks"
+
+
+def test_random_recommender_excludes_seen():
+    df = _toy_ratings_df()
+    all_movies = set(df["movie_id"])
+    model = RandomRecommender(random_state=7).fit(df)
+    assert model.recommend(1, k=5, exclude_seen=all_movies) == []
+
+
+def test_compare_bias_table_columns_are_aligned():
+    """
+    The label column must fit the longest metric name. At 28 chars,
+    'Top-item recommendation share' (29) overflowed and shifted that row.
+    """
+    pop = {"catalog_coverage": 0.05, "top_item_share": 0.096}
+    mf = {"catalog_coverage": 0.63, "top_item_share": 0.046}
+    rnd = {"catalog_coverage": 0.98, "top_item_share": 0.008}
+
+    rows = [line for line in compare_bias(pop, mf, rnd).splitlines()
+            if line.startswith(("Metric", "Catalog coverage", "Top-item"))]
+    assert len(rows) == 3
+
+    # longest label (29) + 1 char padding + 1 separator space
+    value_col = len("Top-item recommendation share") + 2
+    for row in rows:
+        assert row[value_col - 1] == " ", f"Label column not padded: {row!r}"
+        assert row[value_col] != " ", f"Value column misaligned: {row!r}"
+
+
+def test_compare_bias_still_works_without_the_random_column():
+    pop = {"catalog_coverage": 0.05, "top_item_share": 0.096}
+    mf = {"catalog_coverage": 0.63, "top_item_share": 0.046}
+    assert "Random" not in compare_bias(pop, mf)
+
+
 # --- Input guards -------------------------------------------------------------
 
 
 @pytest.mark.parametrize("model_factory", [
     lambda df: PopularityRecommender(min_ratings=1).fit(df),
     lambda df: MatrixFactorizationRecommender(n_factors=2, n_epochs=3, random_state=42).fit(df),
+    lambda df: RandomRecommender(random_state=42).fit(df),
 ])
 def test_negative_k_raises_instead_of_silently_truncating(model_factory):
     """
@@ -173,6 +218,7 @@ def test_negative_k_raises_instead_of_silently_truncating(model_factory):
 @pytest.mark.parametrize("model_class,kwargs", [
     (PopularityRecommender, {}),
     (MatrixFactorizationRecommender, {"n_factors": 2, "n_epochs": 3}),
+    (RandomRecommender, {}),
 ])
 def test_recommend_before_fit_raises_runtime_error(model_class, kwargs):
     """An unfitted model should say so, not fail on a None attribute."""

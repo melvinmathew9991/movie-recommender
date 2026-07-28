@@ -73,32 +73,51 @@ well while just recommending whatever is already popular to everyone. The audit
 measures **catalog coverage** (what fraction of the catalog ever gets
 recommended) and **top-item share** (how concentrated recommendations are).
 
-## Results (synthetic data)
+## ⚠️ The reported results do not hold up
 
-**Rating prediction (Matrix Factorization):**
-- Test RMSE: **1.1998** | Test MAE: **0.9718**
-- Train RMSE fell to 0.8846 by epoch 20
+Every metric this project published was reported without a reference point. Two
+were added — predicting the global mean for every rating, and recommending at
+random — and the previous conclusions collapse:
+
+**Rating prediction:**
+
+| Metric | Value |
+|---|---|
+| MF test RMSE | 1.1998 |
+| Always-predict-global-mean RMSE | **1.1246** |
+
+**The model is worse than a constant.** Predicting the same number for every
+single rating beats it.
 
 **Ranking quality (n=200 users):**
 
 | Model | Precision@10 | Recall@10 |
 |---|---|---|
+| Random (reference) | 0.0370 | 0.0396 |
 | Popularity baseline | 0.0125 | 0.0111 |
-| Matrix Factorization | **0.0610** | **0.0630** |
+| Matrix Factorization | 0.0610 | 0.0630 |
 
-MF outperforms the naive baseline by roughly 5× on both ranking metrics.
+The previously advertised "5× better than the baseline" was measured against a
+baseline that **scores worse than random selection**. Against random — the
+correct floor — MF's margin is 1.6×, not 5×.
 
 **Popularity-bias audit:**
 
-| Metric | Popularity baseline | Matrix Factorization |
-|---|---|---|
-| Catalog coverage | 5.0% | **63.0%** |
-| Top-item recommendation share | 9.6% | 4.6% |
+| Metric | Popularity baseline | Matrix Factorization | Random (reference) |
+|---|---|---|---|
+| Catalog coverage | 5.0% | 63.0% | **99.7%** |
+| Top-item recommendation share | 9.6% | 4.6% | 0.9% |
 
-**Finding:** MF's catalog coverage (63%) is dramatically broader than the
-popularity baseline's (5%), and no single item dominates its recommendation
-slots. Evidence of per-user personalization rather than the model reproducing
-global popularity under a different name.
+Catalog coverage of 63% was presented as evidence of personalization. Random
+selection reaches 99.7%. Breadth alone was never evidence of anything.
+
+**What this means:** the numbers were never wrong arithmetically — they were
+uninterpretable. A metric with no reference point cannot distinguish a model
+that learned something from one that learned nothing. The next step is finding
+out *why* the model can't beat a constant.
+
+The reference baselines are now permanent parts of the pipeline, and training
+prints an explicit `WARNING` if the model ever fails to beat either.
 
 ## Planned
 
