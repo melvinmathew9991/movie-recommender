@@ -1,14 +1,18 @@
 """
 models.py
 
-Two recommenders, deliberately contrasted:
+Three recommenders, deliberately contrasted:
 
 1. PopularityRecommender -- the naive baseline every recommender project
    needs. Recommends whatever's most-rated/highest-rated globally, with
-   zero personalization. This exists specifically so the planned bias
-   audit has something to compare against.
+   zero personalization. This exists specifically so the bias audit has
+   something to compare against.
 
-2. MatrixFactorizationRecommender -- a real collaborative-filtering model,
+2. RandomRecommender -- the floor. Not a model, a reference point: it is
+   what "learned nothing" scores. Without it, metrics like catalog
+   coverage have no scale to be read against.
+
+3. MatrixFactorizationRecommender -- a real collaborative-filtering model,
    implemented from scratch via stochastic gradient descent (not calling
    scikit-surprise or implicit), following the standard formulation:
 
@@ -51,6 +55,40 @@ class PopularityRecommender:
         exclude_seen = exclude_seen or set()
         candidates = [m for m in self.item_scores_.index if m not in exclude_seen]
         return candidates[:k]
+
+
+class RandomRecommender:
+    """
+    Uniformly random picks from the catalog. Not a serious recommender -- it is
+    the reference point that makes the other numbers interpretable.
+
+    Without it, "MF covers 63% of the catalog" reads as evidence of
+    personalization, when random selection covers nearly everything: broad
+    coverage on its own only rules out popularity collapse, it does not
+    demonstrate per-user targeting. Precision@K against random is the check on
+    whether the model has learned anything beyond chance.
+    """
+
+    def __init__(self, random_state: int = 42):
+        self.random_state = random_state
+        self.rng = np.random.default_rng(random_state)
+        self.items_ = None
+
+    def fit(self, ratings_df):
+        self.items_ = ratings_df["movie_id"].unique()
+        return self
+
+    def recommend(self, user_id, k: int = 10, exclude_seen: set = None):
+        if k < 0:
+            raise ValueError(f"k must be non-negative, got {k}")
+        if self.items_ is None:
+            raise RuntimeError("Model is not fitted. Call fit() first.")
+        exclude_seen = exclude_seen or set()
+        pool = [m for m in self.items_ if m not in exclude_seen]
+        size = min(k, len(pool))
+        if size == 0:
+            return []
+        return [pool[i] for i in self.rng.choice(len(pool), size=size, replace=False)]
 
 
 class MatrixFactorizationRecommender:

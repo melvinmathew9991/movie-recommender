@@ -44,18 +44,54 @@ def audit_popularity_bias(model, users: list, all_movie_ids: list,
     }
 
 
-def compare_bias(popularity_results: dict, mf_results: dict) -> str:
-    """Human-readable comparison of the two models' bias profiles."""
+# Column widths. The label column must fit the longest metric name
+# ("Top-item recommendation share", 29 chars) -- at 28 it overflowed and shifted
+# that row out of alignment with the header.
+_LABEL_W = 30
+_COL_W = 22
+
+# A model must beat the naive baseline's coverage by more than this factor before
+# its breadth counts as evidence of anything.
+_COVERAGE_MARGIN = 1.2
+
+
+def _row(label: str, *values: str) -> str:
+    cells = " ".join(f"{v:<{_COL_W}}" for v in values)
+    return f"{label:<{_LABEL_W}} {cells}".rstrip()
+
+
+def compare_bias(popularity_results: dict, mf_results: dict,
+                 random_results: dict = None) -> str:
+    """
+    Human-readable comparison of the models' bias profiles.
+
+    `random_results` is optional but strongly recommended: catalog coverage has
+    no meaningful scale without it. Random selection covers nearly the whole
+    catalog, so it is the ceiling against which MF's coverage should be read --
+    high coverage rules out popularity collapse, it does not by itself prove
+    personalization.
+    """
+    def cols(pop_val, mf_val, rnd_val):
+        parts = [pop_val, mf_val]
+        if random_results is not None:
+            parts.append(rnd_val)
+        return parts
+
     lines = [
         "Popularity-bias audit: comparing catalog coverage between models.",
         "",
-        f"{'Metric':<28} {'Popularity baseline':<22} {'Matrix Factorization':<22}",
-        f"{'Catalog coverage':<28} {popularity_results['catalog_coverage']:.1%}"
-        f"{'':<16} {mf_results['catalog_coverage']:.1%}",
-        f"{'Top-item recommendation share':<28} {popularity_results['top_item_share']:.1%}"
-        f"{'':<16} {mf_results['top_item_share']:.1%}",
+        _row("Metric", *cols("Popularity baseline", "Matrix Factorization",
+                             "Random (reference)")),
+        _row("Catalog coverage",
+             *cols(f"{popularity_results['catalog_coverage']:.1%}",
+                   f"{mf_results['catalog_coverage']:.1%}",
+                   f"{random_results['catalog_coverage']:.1%}" if random_results else "")),
+        _row("Top-item recommendation share",
+             *cols(f"{popularity_results['top_item_share']:.1%}",
+                   f"{mf_results['top_item_share']:.1%}",
+                   f"{random_results['top_item_share']:.1%}" if random_results else "")),
     ]
-    if mf_results["catalog_coverage"] <= popularity_results["catalog_coverage"] * 1.2:
+    if mf_results["catalog_coverage"] <= popularity_results["catalog_coverage"] * _COVERAGE_MARGIN:
         lines.append("")
         lines.append("FINDING: MF's catalog coverage is not meaningfully better than the naive "
                       "popularity baseline. The model may be learning to approximate global "
@@ -63,7 +99,14 @@ def compare_bias(popularity_results: dict, mf_results: dict) -> str:
                       "investigating before claiming personalization as a feature.")
     else:
         lines.append("")
-        lines.append("FINDING: MF shows meaningfully broader catalog coverage than the popularity "
-                      "baseline, consistent with genuine per-user personalization rather than "
-                      "just reproducing global popularity.")
+        lines.append("FINDING: MF's catalog coverage is meaningfully broader than the popularity "
+                      "baseline, so it is not simply reproducing global popularity under another "
+                      "name -- the failure mode this audit exists to catch.")
+        if random_results is not None:
+            lines.append("")
+            lines.append("Read this against the random reference, not in isolation: random "
+                          f"selection reaches {random_results['catalog_coverage']:.1%} coverage, so "
+                          "breadth alone is not a personalization result. The evidence that the "
+                          "targeting is any GOOD is Precision@K measured against that same "
+                          "random reference.")
     return "\n".join(lines)
